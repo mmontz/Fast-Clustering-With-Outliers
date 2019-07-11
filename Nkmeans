@@ -1,0 +1,557 @@
+
+#include <iostream>
+#include <vector>
+#include <set>
+#include <unordered_set>
+#include <cmath>
+#include <map>
+#include <fstream>
+#include <limits>
+#include <float.h>
+#include <ctime>
+#include <stdlib.h>
+
+using namespace std;
+
+
+string inputfilename;
+string outliersfilename;
+string KZCfilename;
+string KZOfilename;
+
+vector <vector <double>> input;
+vector <int> firstsample;
+vector <int> weights;
+vector <vector <double>> distances;
+set <int> heavypoints;
+map <int, set<int>> balls;
+set <int> KZoutliers;
+vector <int> Lloydpointsset;
+double mutual = 0;
+int Z;
+int K;
+double Radius;
+int d;
+int n;
+vector <set <int>> clusters;    // keep the points number here
+vector <vector <double>> centers;
+vector <vector <double>> bestcenters;
+set <int> firstcenters;
+double curobjective;
+double prevobjective;
+vector <pair <int , double>> minheap; //points and distances from cluster
+vector <pair <int , double>> bestoutliers;
+double outlierscost = 0;
+double minimprovement = 0.00001;
+clock_t t1,t2;
+double OPT;
+double MinDist;
+double MaxDist;
+double finalOPT;
+double MinObj = DBL_MAX;
+int discardedpoints;
+vector <vector <double>> coreset;
+double p;
+bool morethankpoints = false;
+bool goodres = false;
+
+vector <double> findmean (vector <vector <double>>& v, int curcluster , bool haveWeight){
+    vector <double> Mean;
+    Mean.resize(d);
+    set <int>:: iterator it;
+    double temp = 0;
+    if (!haveWeight)
+        temp = (double)clusters[curcluster].size();
+    else{
+        for (it=clusters[curcluster].begin() ; it!= clusters[curcluster].end() ; it++){
+            temp+= (double)weights[*it];
+        }
+        
+    }
+    for (int i=0 ; i<d ; i++){
+        Mean[i] = 0;
+        for (it=clusters[curcluster].begin() ; it!= clusters[curcluster].end() ; it++){
+            if (haveWeight)
+                Mean[i]+= (double)weights[*it] * v[*it][i];
+            else
+                Mean[i]+= v[*it][i];
+            
+        }
+    }
+    for (int i=0 ; i<d ; i++)
+        Mean[i] /= temp;
+    return Mean;
+}
+
+void findnewcenters(vector <vector <double>>& v,  int centersize , bool haveWeight){
+    for (int i=0 ; i<centersize ; i++){
+        centers[i] = findmean(v , i , haveWeight);
+    }
+}
+
+double finddist (vector <double>& p1 , vector <double>& p2){
+    double dist = 0;
+    for (int i=0; i<p1.size() ; i++){
+        dist+= pow(p1[i]-p2[i] , 2);
+    }
+    return sqrt(dist);
+}
+
+double findcluster (int centersize, vector <vector <double>> & v, int p, int w){
+    double Mindist = DBL_MAX;
+    int bestcenter = -1;
+    
+    for (int i=0 ; i<centersize ; i++){
+        double curdist = finddist (centers[i] , v[p]);
+        if (curdist < Mindist){
+            Mindist = curdist;
+            bestcenter = i;
+        }
+    }
+    
+    curobjective += ((double)w*pow(Mindist,2));
+    clusters[bestcenter].insert(p);
+    return Mindist;
+}
+
+void cluster (vector <vector <double>> & v , int centersize , vector <int>& pointsLabels , int totalpoints , bool haveWeight){
+    clusters.clear();
+    clusters.resize(centersize);
+    prevobjective = curobjective;
+    curobjective = 0;
+    for (int i=0 ; i<totalpoints ; i++){
+        if (totalpoints == n)
+            findcluster(centersize , v, i, 1);
+        else{
+            if (haveWeight)
+                findcluster(centersize , v, pointsLabels[i] , weights[pointsLabels[i]]);
+            else
+                findcluster(centersize , v, pointsLabels[i] , 1);
+        }
+    }
+}
+
+void decreaseinheap (){
+    int index = minheap.size()-1;
+    while (index>0 && minheap[index].second < minheap[(index-1)/2].second){
+        swap (minheap[index], minheap[(index-1)/2]);
+        index = (index-1)/2;
+    }
+}
+
+void heapify (int index){
+    int l;
+    int r;
+    int smallest;
+    while (true) {
+        l = index*2+1;
+        r = index*2+2;
+        smallest = index;
+        if (l<minheap.size() && minheap[l].second < minheap[smallest].second){
+            smallest = l;
+        }
+        if (r<minheap.size() && minheap[r].second < minheap[smallest].second){
+            smallest = r;
+        }
+        if (smallest == index)
+            return;
+        swap (minheap[smallest], minheap[index]);
+        index = smallest;
+    }
+}
+
+void addtoheap (pair <int, double> pointdist){
+    if (minheap.size() < Z){
+        minheap.push_back(pointdist);
+        decreaseinheap ();
+    }
+    else{
+        if (minheap[0].second < pointdist.second){
+            minheap[0] = pointdist;
+            heapify (0);
+        }
+    }
+}
+
+void finalclusters (int centersize , vector <int>& v,  int totalpoints , int outlierSize){
+    clusters.clear();
+    clusters.resize(centersize);
+    curobjective = 0;
+    
+    if (outlierSize == 0){
+        for (int i=0 ; i<totalpoints ; i++){
+            if (totalpoints == n)
+                findcluster(centersize, input, i, 1);
+            else
+                findcluster (centersize , input, v[i] , 1);
+        }
+        weights.clear();
+        weights.resize(centersize);
+        int s = 0;
+        for (int i=0 ; i<centersize ; i++){
+            weights[i] = clusters[i].size();
+            s+= weights[i];
+        }
+
+    }
+    else{
+        minheap.clear();
+        for (int i=0 ; i<n ; i++){
+            double tempres =findcluster(centersize , input, i , 1);
+            addtoheap (make_pair(i,tempres));
+        }
+        outlierscost = 0;
+
+        for (int i=0 ; i<minheap.size() ; i++){
+            outlierscost += pow(minheap[i].second,2);
+        }
+        
+        if ((curobjective - outlierscost)< MinObj){
+            bestoutliers = minheap;
+            bestcenters = centers;
+            finalOPT = OPT;
+            MinObj = curobjective - outlierscost;
+        }
+        
+    }
+}
+
+
+void uniformsampling(){
+    firstsample.clear();
+    p = ((double)K*(double)log(n))/(double)(Z);
+    p*=2.5;
+    for (int i=0 ; i<n; i++){
+        double r = ((double) rand() / (RAND_MAX));
+        if (r<=p)
+            firstsample.push_back(i);
+    }
+}
+
+
+
+void readinput (){
+    input.resize(n);
+    for (int i=0 ; i<n ; i++)
+        input[i].resize(d);
+    
+    ifstream file;
+    file.open (inputfilename);
+    
+    for (int i=0 ; i<n; i++){
+        for (int j=0 ; j<d ; j++){
+            file >> input[i][j];
+        }
+    }
+    
+    
+    file.close();
+}
+
+void findMinMaxDists (vector <vector <double>> & v){
+    MinDist = DBL_MAX;
+    MaxDist = DBL_MIN;
+    for (int i=1 ; i<v.size() ; i++){
+        double temp = finddist(v[0], v[i]);
+        MinDist = min (MinDist, temp);
+        MaxDist = max (MaxDist , temp);
+    }
+    if (MinDist == 0){
+        MinDist = 2;
+    }
+}
+
+void Lloyd (vector <vector <double>>& v, int centersize , vector <int> & pointsLabels , int totalpoints , bool haveWeight){
+    
+    curobjective = DBL_MAX;
+    prevobjective = DBL_MAX;
+    while (true){
+        cluster(v , centersize , pointsLabels , totalpoints , haveWeight);
+        if (prevobjective-curobjective <= minimprovement*prevobjective)
+            break;
+        findnewcenters(v, centersize , haveWeight);
+    }
+}
+
+void kmeansplusplus(vector <vector <double>> & v , int centersize , vector <int>& pointsLabels , int totalpoints, bool haveWeight){
+   
+    if (centersize > totalpoints){
+        cout << "oops! #cluster > #instances or #cluster > #sampled-instances" << endl;
+        exit(1);
+    }
+    
+    centers.clear();
+    centers.resize(centersize);
+    for (int i=0 ; i<centersize ; i++)
+        centers[i].resize(d);
+    
+    map <int , double> distancefromCenter;
+    for (int i=0 ; i<totalpoints ; i++)
+        distancefromCenter[i] = DBL_MAX;
+    
+    firstcenters.clear();
+    
+    int r = rand()%totalpoints;
+    firstcenters.insert(r);
+    int count = 0;
+    for (int i=0 ; i<d ; i++){
+        if (totalpoints == n){
+            centers[count][i] = v[r][i];
+        }
+        else
+            centers[count][i] = v[pointsLabels[r]][i];
+    }
+    count++;
+    for (int j=0 ; j<centersize-1 ; j++){
+        double totaldist = 0;
+        for (int i=0 ; i<totalpoints ; i++){
+            double curdist;
+            if (totalpoints == n)
+                curdist = finddist(v[i], v[r]);
+            else{
+                curdist = finddist(v[pointsLabels[i]], v[pointsLabels[r]]);
+            }
+            distancefromCenter[i] = min (distancefromCenter[i],curdist);
+            if (haveWeight)
+                totaldist+= (double)weights[pointsLabels[i]]*pow(distancefromCenter[i],2);
+            else
+                totaldist+= pow(distancefromCenter[i],2);
+            
+        }
+        double newr = ((double) rand() / (RAND_MAX));
+        double sum = 0;
+        for (int i=0 ; i<totalpoints ; i++){
+            if (firstcenters.find(i) == firstcenters.end()){
+                double temp;
+                if (haveWeight)
+                    temp = ((double)weights[pointsLabels[i]]*pow(distancefromCenter[i],2))/totaldist;
+                else
+                    temp = pow(distancefromCenter[i],2)/totaldist;
+                sum += temp;
+                if (sum >= newr){
+                    firstcenters.insert(i);
+                    r = i;
+                    i = totalpoints;
+                }
+            }
+        }
+        for (int i=0 ; i<d ; i++){
+            if (totalpoints == n){
+                centers[count][i] = v[r][i];
+            }
+            else
+                centers[count][i] = v[pointsLabels[r]][i];
+        }
+        count++;
+    }
+
+}
+
+void preprocessing(){
+    if ((double)Z > 2.5*(double)K*(double)log(n)){
+        uniformsampling();
+        kmeansplusplus(input , K+(int)((double)Z*p),firstsample, firstsample.size() , 0);
+        Lloyd(input , K+(int)((double)Z*p), firstsample,firstsample.size() , 0);
+        finalclusters(K+(int)((double)Z*p), firstsample, firstsample.size() , 0);
+    }
+    else{
+        p = 1.0;
+        firstsample.clear();
+        kmeansplusplus(input , K+(Z*p) , firstsample, n , 0);
+        Lloyd(input , K+(Z*p) , firstsample , n , 0);
+        finalclusters(K+(Z*p) , firstsample, n , 0);
+    }
+}
+
+void findheavypoints (){
+    balls.clear();
+    heavypoints.clear();
+    for (int i=0 ; i<K+(int)((double)Z*p) ; i++){
+        int count = 0;
+        for (int j=0 ; j<K+(int)((double)Z*p) ; j++){
+            if (distances[i][j] <= Radius){
+                count+= weights[j];
+                balls[i].insert (j);
+            }
+        }
+        if (count >= (int)(2.0*(double)Z*p)){
+            heavypoints.insert(i);
+        }
+    }
+}
+
+void discardKZ (){
+    KZoutliers.clear();
+    for (int i=0 ; i<K+(int)((double)Z*p) ; i++){
+        set <int>:: iterator it;
+        bool addtoKZ = true;
+        for (it= balls[i].begin () ; it!= balls[i].end() ; it++){
+            if (heavypoints.find(*it) != heavypoints.end()){
+                addtoKZ = false;
+                break;
+            }
+        }
+        if (addtoKZ){
+            KZoutliers.insert(i);
+        }
+    }
+}
+
+void pointsforLloyd (){
+    Lloydpointsset.clear();
+    for (int i=0 ; i<K+(int)((double)Z*p) ; i++)
+        if (KZoutliers.find(i) == KZoutliers.end()){
+            Lloydpointsset.push_back(i);
+        }
+}
+
+void initialize() {
+    Radius = (sqrt(OPT/(double)Z));
+    findheavypoints ();
+    discardKZ();
+    
+    pointsforLloyd ();
+    if (Lloydpointsset.size() <= K){
+        return;
+    }
+    kmeansplusplus(coreset, K , Lloydpointsset , Lloydpointsset.size() , 1);
+    Lloyd(coreset, K, Lloydpointsset, Lloydpointsset.size(), 1);
+    vector <int> v;
+    finalclusters(K, v, n, Z);
+    morethankpoints = true;
+}
+
+void findmutualOutliers (){
+    ifstream file;
+    file.open (outliersfilename);
+    int temp;
+    unordered_set <int> trueoutliers;
+    for (int i=0 ; i<Z; i++){
+        file >> temp;
+        trueoutliers.insert(temp);
+    }
+    file.close();
+    
+    mutual = 0;
+    for (int i=0 ; i<Z ; i++){
+        if (trueoutliers.find(bestoutliers[i].first) != trueoutliers.end())
+            mutual++;
+    }
+}
+
+
+void distMatrix (){
+    MinDist = DBL_MAX;
+    MaxDist = DBL_MIN;
+    distances.clear();
+    distances.resize(K+(int)((double)Z*p));
+    for (int i=0 ; i<K+(int)((double)Z*p) ; i++)
+        distances[i].resize(K+(int)((double)Z*p));
+    
+    for (int i=0 ; i<K+(int)((double)Z*p) ; i++){
+        distances[i][i] = 0;
+        for (int j=i+1 ; j<K+(int)((double)Z*p) ; j++){
+            distances[i][j] = finddist (coreset[i],coreset[j]);
+            distances[j][i] = distances[i][j];
+            MinDist = min (MinDist, distances[i][j]);
+            MaxDist = max (MaxDist , distances[i][j]);
+        }
+    }
+    if (MinDist == 0){
+        MinDist = 2;
+    }
+    
+}
+
+
+void saveres(){
+    ofstream file1;
+    ofstream file2;
+    file1.open (KZCfilename);
+    file2.open(KZOfilename);
+    for (int i=0 ; i<Z ; i++)
+        file2 << bestoutliers[i].first << " ";
+    
+    for (int i=0 ; i<K; i++){
+        for (int j=0 ; j<d ; j++)
+            file1 << bestcenters[i][j] << " ";
+        file1 << "\n";
+    }
+    
+    file1.close();
+    file2.close();
+}
+
+void YourInput (){
+    
+    cout << "this code is g++ 4.2 friendly" << endl;
+    cout << "---------------" << endl;
+    
+    cout << "enter #instances (n), dimension (d), #clusters (k) and #noisy-instances aka outliers (z), respectively:" << endl;;
+    
+    cin >> n >> d >> K >> Z;
+    cout << endl;
+    
+    cout << "enter the directory of your input file." << endl;
+    cout << "example: /home/owner/inputfile.txt" << endl << endl;
+    
+    cout << "your input file should have n rows and d columns. values in a row must be separated by space." << endl;
+    cin >> inputfilename;
+    cout << endl;
+    
+    cout << "enter the directory of your noisy instances file." << endl;
+    cout << "example: /home/owner/outliersfile.txt" << endl << endl;
+    cout << "this file should have z values from 0 to n-1, separated by space, indicating the labels of the outliers." << endl;
+    
+    cin >> outliersfilename;
+    cout << endl;
+    
+    cout << "where do you wish us to write the output centers? enter the directory." << endl;
+    cout << "example: /home/owner/MyCentersfile.txt" << endl << endl;
+    cout << "this file will be filled by k rows and d columns, each row indicating a center outputted by the algorithm. values in the rows are separated by space." << endl;
+    cin >> KZCfilename;
+    cout << endl;
+    
+    cout << "where do you wish us to write the output outliers? enter the directory." << endl;
+    cout << "example: /home/owner/MyOutliersfile.txt" << endl << endl;
+    cout << "this file will be filled by z values from 0 to n-1, separated by space, each indicating the label of an outlier outputted by the algorithm " << endl;
+    cin >> KZOfilename;
+    cout << endl;
+    
+    cout << "thanks! We'll give you the results when they're ready!" << endl;
+}
+
+int main(int argc, const char * argv[]) {
+    t1=clock();
+    
+    YourInput ();
+    readinput ();
+    preprocessing();
+    coreset = centers;
+    distMatrix();
+    double lbound = n*pow(MinDist,2);
+    double ubound = n*pow(MaxDist, 2);
+    for (int i=0 ; i<3 ; i++){
+        for (double l=lbound ; l<=ubound ; l*=2){
+            OPT=l;
+            initialize ();
+        }
+    }
+    
+    if (morethankpoints){
+        findmutualOutliers();
+        saveres ();
+        cout << "mutual outliers "<< mutual << " out of " << Z << endl;
+        cout << "precision " << mutual/(double)Z << endl;
+        cout << "NK-MEANS objective " << MinObj << endl;
+    }
+
+    t2=clock();
+    
+    float diff ((float)t2-(float)t1);
+    float seconds = diff / CLOCKS_PER_SEC;
+    cout <<"running time (seconds): " << seconds<<endl;
+    system ("pause");
+    
+    return 0;
+}
