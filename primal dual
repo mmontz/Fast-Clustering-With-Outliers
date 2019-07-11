@@ -1,0 +1,938 @@
+#include <iostream>
+#include <vector>
+#include <math.h>
+#include <set>
+#include <map>
+#include <string>
+#include <fstream>
+#include <stdlib.h>
+#include <ctime>
+#include <cmath>
+#include <limits>
+#include <unordered_set>
+#include <float.h>
+
+using namespace std;
+
+vector <vector <double>> bestcenters;
+vector <pair <int , double>> bestoutliers;
+
+
+string inputfilename;
+string outliersfilename;
+string PDCfilename;
+string PDOfilename;
+
+vector <vector <double>> costs; //keeps the distances
+vector <vector <double>> points;
+vector <vector <double>> input;
+vector <int> weights;
+int dimension;
+int n;
+int mutual = 0;
+double Time = 0;
+double penalty;
+vector <pair <int,int>> costsminheap;   //saves the coordinates
+double facilitycost;
+vector <pair <int, pair <double,int>>> RemainingFminheap;  // {facility , {unpaid portion of facilitycost, current ball size arround the facility}}
+int K;
+int outliersize;
+bool exactlyk;
+bool stopSearch;
+
+set <int> tightAlphas;
+set <int> paidfor;
+map <int , int> connectingWitness; //city to facility
+map <int , int> locationinheap;
+double constraint1;
+double constraint2;
+map <int , set <int>> ContributingCities; // mapping facilities to cities that pay for them
+map <int , set <int>> PartiallyAssignedtoF; // mapping cities to all the facilities that they partialy pay for
+map <int , set <int>> Beta;
+clock_t t1,t2;
+vector <pair <int , double>> outliersMinheap;
+double objective = 0;
+double OPT;
+double MinDist;
+double MaxDist;
+double finalOPT;
+double MinObj = DBL_MAX;
+double tightnessGap = 0.0001;
+vector <int> firstsample;
+vector <set <int>> clusters;    // keep the points number here
+vector <vector <double>> centers;
+set <int> firstcenters;
+double curobjective;
+double prevobjective;
+vector <pair <int , double>> minheap; //points and distances from cluster
+double outlierscost = 0;
+double minimprovement = 0.00001;
+double p;
+
+double finddist (vector <double>& p1 , vector <double>& p2){
+    double dist = 0;
+    for (int i=0; i<p1.size() ; i++){
+        dist+= pow(p1[i]-p2[i] , 2);
+    }
+    return sqrt(dist);
+}
+
+
+void setcosts (){
+    costs.clear();
+    costs.resize(points.size());
+    for (int i=0 ; i<points.size() ; i++)
+        costs[i].resize(points.size());
+    
+    for (int i=0 ; i<points.size() ; i++){
+        costs[i][i] = 0;
+        for (int j=i+1 ; j<points.size() ; j++){
+            costs[i][j] = finddist (points[i],points[j]);
+            costs[j][i] = costs[i][j];
+        }
+    }
+}
+
+
+
+void addtocostheap (pair <int , int> curpair){
+    costsminheap.push_back(curpair);
+    int index = (int)costsminheap.size()-1;
+    while (index>0 && costs[costsminheap[index].first][costsminheap[index].second] < costs[costsminheap[(index-1)/2].first][costsminheap[(index-1)/2].second] ){
+        swap (costsminheap[index] , costsminheap [(index-1)/2]);
+        index = (index-1)/2;
+    }
+}
+
+void heapify1 (int index){
+    int l;
+    int r;
+    int smallest;
+    while (true){
+        smallest = index;
+        l = index*2+1;
+        r = index*2+2;
+        if (l<costsminheap.size() && costs[costsminheap[l].first][costsminheap[l].second] < costs[costsminheap[smallest].first][costsminheap[smallest].second])
+            smallest = l;
+        if (r<costsminheap.size() && costs[costsminheap[r].first][costsminheap[r].second] < costs[costsminheap[smallest].first][costsminheap[smallest].second])
+            smallest = r;
+        if (index == smallest)
+            return;
+        swap (costsminheap[smallest] , costsminheap[index]);
+        index = smallest;
+    }
+}
+
+void heapify2 (int index){
+    if (RemainingFminheap.empty())
+        return;
+    int l;
+    int r;
+    int smallest;
+    while (true){
+        smallest = index;
+        l = index*2+1;
+        r = index*2+2;
+        //ball sizes
+        int Sbsize = RemainingFminheap[smallest].second.second;
+        int lbsize = l<RemainingFminheap.size()? RemainingFminheap[l].second.second: 0;
+        int rbsize = r<RemainingFminheap.size()? RemainingFminheap[r].second.second: 0;
+        if (lbsize!= 0 && (Sbsize==0 || RemainingFminheap[l].second.first*(double)RemainingFminheap[smallest].second.second)< RemainingFminheap[smallest].second.first*(double)RemainingFminheap[l].second.second)
+            smallest = l;
+        if (rbsize!= 0 && (Sbsize==0 || RemainingFminheap[r].second.first*(double)RemainingFminheap[smallest].second.second) < RemainingFminheap[smallest].second.first*(double)RemainingFminheap[r].second.second)
+            smallest = r;
+        if (index == smallest)
+            return;
+        swap (locationinheap[RemainingFminheap[smallest].first] , locationinheap[RemainingFminheap[index].first]);
+        swap (RemainingFminheap[smallest] , RemainingFminheap[index]);
+        index = smallest;
+    }
+}
+
+pair <int, int> extractMin1 (){
+    pair <int, int> minpair;
+    minpair = costsminheap[0];
+    costsminheap[0] = costsminheap[costsminheap.size()-1];
+    costsminheap.erase(costsminheap.begin()+costsminheap.size()-1);
+    heapify1(0);
+    return minpair;
+}
+
+pair <int, pair <double,int>> extractMin2 (){
+    pair <int, pair <double,int>> minpair;
+    minpair = RemainingFminheap[0];
+    RemainingFminheap[0] = RemainingFminheap[RemainingFminheap.size()-1];
+    swap (locationinheap[minpair.first] , locationinheap[RemainingFminheap[0].first]);
+    RemainingFminheap.erase(RemainingFminheap.begin()+RemainingFminheap.size()-1);
+    locationinheap.erase(minpair.first);
+    heapify2(0);
+    return minpair;
+}
+
+double getMin1 (){
+    while (!costsminheap.empty() && (tightAlphas.find(costsminheap[0].first) != tightAlphas.end() || tightAlphas.find(costsminheap[0].second) != tightAlphas.end()))
+        extractMin1();
+    if (costsminheap.empty())
+        return DBL_MAX;
+    return costs[costsminheap[0].first][costsminheap[0].second];
+}
+
+double getMin2 (){
+    while (!RemainingFminheap.empty() && (tightAlphas.find(RemainingFminheap[0].first) != tightAlphas.end()))
+        extractMin2();
+    if (RemainingFminheap.empty() || RemainingFminheap[0].second.second == 0)
+        return DBL_MAX;
+    return RemainingFminheap[0].second.first/(double)RemainingFminheap[0].second.second;
+}
+
+void createcostsminheap (){
+    for (int i=0 ; i<points.size() ; i++)
+        for (int j = 0 ; j<points.size() ; j++)
+            addtocostheap ({i,j});
+}
+
+void initializeRemainingFheap(){
+    for (int i=0 ; i<points.size() ; i++){
+        RemainingFminheap.push_back({i,{facilitycost , 0}});
+        locationinheap[i] = (int)RemainingFminheap.size()-1;
+    }
+}
+
+void decreaseinHeap (vector <pair <int, pair <double,int>>> & minheap, int index){
+    while ((index > 0 && minheap[index].second.second != 0) && (minheap[(index-1)/2].second.second == 0 ||  minheap[index].second.first*(double)minheap[(index-1)/2].second.second < minheap[(index-1)/2].second.first*(double)minheap[index].second.second)){
+        swap (locationinheap[minheap[index].first] , locationinheap[minheap[(index-1)/2].first]);
+        swap (minheap[index],minheap[(index-1)/2]);
+        index = (index-1)/2;
+    }
+}
+
+
+void increase1 (){
+    for (int i=0 ; i<points.size() ; i++)
+        if (tightAlphas.find(i) == tightAlphas.end()){
+            RemainingFminheap[locationinheap[i]].second.first -= (constraint1-Time) * (double)RemainingFminheap[locationinheap[i]].second.second;
+            decreaseinHeap (RemainingFminheap, locationinheap[i]);
+        }
+}
+
+void increase2 (double val){
+    for (int i=0 ; i<points.size() ; i++){
+        if (tightAlphas.find(i) == tightAlphas.end()){
+            RemainingFminheap[locationinheap[i]].second.first -= (val*(double)RemainingFminheap[locationinheap[i]].second.second);
+            decreaseinHeap(RemainingFminheap, locationinheap[i]);
+        }
+    }
+}
+void type1(){
+    increase1();
+    pair <int ,int> minpair = extractMin1();
+    
+    if (paidfor.find(minpair.first) != paidfor.end()){
+        connectingWitness[minpair.second] = minpair.first;
+        tightAlphas.insert(minpair.second);
+        set <int>:: iterator it;
+        for (it = PartiallyAssignedtoF[minpair.second].begin() ; it!= PartiallyAssignedtoF[minpair.second].end() ; it++){
+            if (tightAlphas.find(*it) == tightAlphas.end() && ContributingCities.find(*it) != ContributingCities.end() && ContributingCities[*it].find(minpair.second) != ContributingCities[*it].end()){
+                ContributingCities[*it].erase(minpair.second);
+                RemainingFminheap[locationinheap[*it]].second.second-= weights[minpair.second];
+                heapify2(locationinheap[*it]);
+            }
+        }
+    }
+    else{
+        ContributingCities[minpair.first].insert(minpair.second);
+        Beta[minpair.first].insert(minpair.second);
+        PartiallyAssignedtoF[minpair.second].insert(minpair.first);
+        RemainingFminheap[locationinheap[minpair.first]].second.second+= weights[minpair.second];
+        decreaseinHeap(RemainingFminheap, locationinheap[minpair.first]);
+    }
+    Time = constraint1;
+}
+
+void type2(){
+    
+    //first increase the dual variables
+    pair <int , pair <double, int>> minpair = extractMin2();
+
+    double Increase = minpair.second.first/(double)minpair.second.second;
+    
+    increase2(Increase);
+    paidfor.insert(minpair.first);
+    // tightAlphas.insert(minpair.first);
+    set <int>:: iterator it;
+    for (it = ContributingCities[minpair.first].begin() ; it!= ContributingCities[minpair.first].end() ; it++){
+        tightAlphas.insert(*it);
+        Beta[minpair.first].insert(*it);
+        set <int>:: iterator it1;
+        for (it1 = PartiallyAssignedtoF[*it].begin() ; it1 != PartiallyAssignedtoF[*it].end() ; it1++){
+            if (tightAlphas.find(*it1) == tightAlphas.end() && ContributingCities.find(*it1) != ContributingCities.end() && ContributingCities[*it1].find(*it) != ContributingCities[*it1].end()){
+                ContributingCities[*it1].erase(*it);
+                RemainingFminheap[locationinheap[*it1]].second.second-= weights[*it];
+                heapify2(locationinheap[*it1]);
+            }
+        }
+        if (connectingWitness.find(*it) == connectingWitness.end())
+            connectingWitness[*it] = minpair.first;
+    }
+    Time += Increase;
+}
+
+void reset(){
+    Time = 0;
+    Beta.clear();
+    costsminheap.clear();
+    createcostsminheap();
+    locationinheap.clear();
+    RemainingFminheap.clear();
+    initializeRemainingFheap();
+    tightAlphas.clear();
+    paidfor.clear();
+    connectingWitness.clear();
+    ContributingCities.clear();
+    PartiallyAssignedtoF.clear();
+    exactlyk = false;
+    stopSearch = false;
+}
+
+set <pair <int,int>> extract1 (double nexttime){
+    set <pair <int,int>> tightdists;
+    while (true){
+        if (costsminheap.empty())
+            return tightdists;
+        if (tightAlphas.find(costsminheap[0].first) != tightAlphas.end() || tightAlphas.find(costsminheap[0].second) != tightAlphas.end())
+            extractMin1();
+        else{
+            if (min(costs[costsminheap[0].first][costsminheap[0].second] ,nexttime) + tightnessGap> max(costs[costsminheap[0].first][costsminheap[0].second] ,nexttime)){
+                tightdists.insert({costsminheap[0].first, costsminheap[0].second});
+                extractMin1();
+            }
+            else
+                return tightdists;
+        }
+        
+    }
+}
+
+set <int> extract2 (double inc){
+    set <int> tightFs;
+    while (true){
+        if (RemainingFminheap.empty())
+            return tightFs;
+        if (tightAlphas.find(RemainingFminheap[0].first) != tightAlphas.end())
+            extractMin2();
+        else
+        {
+            double val = (RemainingFminheap[0].second.second == 0)? DBL_MAX: RemainingFminheap[0].second.first/(double)RemainingFminheap[0].second.second;
+            if (abs (val-inc) < tightnessGap){
+                tightFs.insert(RemainingFminheap[0].first);
+                extractMin2();
+            }
+            else
+                return tightFs;
+        }
+    }
+}
+
+void process (set <int>& tightFs , set <pair <int,int>>& tightcosts , double inc){
+    for (int i=0 ; i<points.size() ; i++)
+        if (tightAlphas.find(i) == tightAlphas.end() && locationinheap.find(i) != locationinheap.end()){
+            RemainingFminheap[locationinheap[i]].second.first -= inc * (double)RemainingFminheap[locationinheap[i]].second.second;
+            decreaseinHeap (RemainingFminheap, locationinheap[i]);
+        }
+    
+    set <pair <int, int>>:: iterator it;
+    for (it = tightcosts.begin() ; it!= tightcosts.end() ; it++){
+        if (paidfor.find (it->first) != paidfor.end()){
+            tightAlphas.insert(it->second);
+            connectingWitness[it->second] = it->first;
+            set <int>:: iterator it4;
+            for (it4 = PartiallyAssignedtoF[it->second].begin() ; it4!= PartiallyAssignedtoF[it->second].end() ; it4++){
+                if (locationinheap.find(*it4) != locationinheap.end() && tightAlphas.find(*it4) == tightAlphas.end() && ContributingCities.find(*it4) != ContributingCities.end() && ContributingCities[*it4].find(it->second) != ContributingCities[*it4].end()){
+                    ContributingCities[*it4].erase(it->second);
+                    RemainingFminheap[locationinheap[*it4]].second.second-= weights[it->second];
+                    heapify2(locationinheap[*it4]);
+                }
+            }
+        }
+    }
+    set <int>:: iterator itf;
+    for (itf = tightFs.begin() ; itf!= tightFs.end() ; itf++){
+        paidfor.insert(*itf);
+        set <int>:: iterator ittemp;
+
+        for (ittemp = ContributingCities[*itf].begin() ; ittemp!= ContributingCities[*itf].end(); ittemp++){
+            tightAlphas.insert(*ittemp);
+            Beta[*itf].insert(*ittemp);
+            if (connectingWitness.find(*ittemp) == connectingWitness.end())
+                connectingWitness[*ittemp] = *itf;
+
+            set <int>:: iterator it3;
+            for (it3 = PartiallyAssignedtoF[*ittemp].begin() ; it3 !=PartiallyAssignedtoF[*ittemp].end() ; it3++){
+                if ((locationinheap.find(*it3) != locationinheap.end()) && (tightAlphas.find(*it3) == tightAlphas.end()) && (ContributingCities.find(*it3) != ContributingCities.end()) && (ContributingCities[*it3].find(*ittemp) != ContributingCities[*it3].end())){
+                    ContributingCities[*it3].erase(*ittemp);
+                    RemainingFminheap[locationinheap[*it3]].second.second-= weights[*ittemp];
+                    heapify2(locationinheap[*it3]);
+                }
+            }
+            
+        }
+    }
+    
+    
+    
+    for (it = tightcosts.begin() ; it!= tightcosts.end() ; it++){
+        if (paidfor.find (it->first) == paidfor.end()){
+            if (ContributingCities[it->first].find (it->second) == ContributingCities[it->first].end()){
+                ContributingCities[it->first].insert(it->second);
+                if (locationinheap.find(it->first) != locationinheap.end())
+                    RemainingFminheap[locationinheap[it->first]].second.second+= weights[it->second];
+                decreaseinHeap(RemainingFminheap, locationinheap[it->first]);
+            }
+            Beta[it->first].insert(it->second);
+            PartiallyAssignedtoF[it->second].insert(it->first);
+        }
+    }
+    
+    
+}
+
+void PDalg(){
+    while (tightAlphas.size()< points.size() && Time < penalty){
+        constraint1 = getMin1();    // alpha_j = c_{i,j} constraint
+        constraint2 = getMin2(); // sigma beta_[i,j] <= f_i constraint
+        set <pair <int, int>> tightcosts;
+        set <int> tightFs;
+        double nexttime = min (Time+constraint2, constraint1);
+        if (min(Time+constraint2,constraint1) + tightnessGap > max(Time+constraint2,constraint1)){
+            tightcosts = extract1(nexttime);
+            tightFs = extract2(nexttime-Time);
+        }
+        else
+            if (constraint1 < Time+constraint2){
+                tightcosts = extract1 (constraint1);
+            }
+            else{
+                tightFs = extract2 (constraint2);
+            }
+        nexttime+= tightnessGap;
+        
+        process (tightFs , tightcosts, nexttime-Time);
+        Time = nexttime;
+    }
+}
+
+void augment (set<int>& c1 , set<int>& c2 , map <int, set <int>>& Beta1 , map <int, set <int>>& Beta2){
+    
+    set <int> c2minusc1;
+    
+    set <int>:: iterator it;
+    for (it = c2.begin(); it!=c2.end() ; it++)
+        if (c1.find(*it) == c1.end())
+            c2minusc1.insert(*it);
+    
+    while (c1.size()< K){
+        if (c2minusc1.empty()){
+            stopSearch = true;
+            return;
+        }
+        it = c2minusc1.begin(); //*it is i in Charikar's paper
+        set <int>:: iterator it1;
+        bool canAdd = true;
+        for (it1 = c1.begin() ; it1!= c1.end() ; it1++){
+            //*it1 is i'
+            if (!canAdd)
+                break;
+            for (int j=0 ; j<n ; j++){
+                if(Beta1[*it1].find(j) != Beta1[*it1].end() && Beta2[*it1].find(j) != Beta2[*it1].end() && Beta1[*it].find(j) != Beta1[*it].end() && Beta2[*it].find(j) != Beta2[*it].end()){
+                    canAdd = false;
+                    break;
+                }
+            }
+        }
+        
+        if (canAdd)
+            c1.insert(*it);
+        
+        c2minusc1.erase(*it);
+    }
+}
+
+void heapify3 (vector <pair<int , double>>& minheap, int index){
+    int l;
+    int r;
+    int smallest;
+    while (true){
+        smallest = index;
+        l = index*2+1;
+        r = index*2+2;
+        if (l<minheap.size() && minheap[l].second < minheap[smallest].second)
+            smallest = l;
+        if (r<minheap.size() && minheap[r].second < minheap[smallest].second)
+            smallest = r;
+        if (index == smallest)
+            return;
+        swap (minheap[smallest] , minheap[index]);
+        index = smallest;
+    }
+}
+
+void addtoOutliers (pair <int, double> pointDistfromCenter){
+    if (outliersMinheap.size() < outliersize){
+        outliersMinheap.push_back(pointDistfromCenter);
+        int index = (int)outliersMinheap.size()-1;
+        while (index > 0 && outliersMinheap[index].second < outliersMinheap[(index-1)/2].second){
+            swap (outliersMinheap[index], outliersMinheap[(index-1)/2]);
+            index = (index-1)/2;
+        }
+        return;
+    }
+    if (outliersMinheap[0].second >= pointDistfromCenter.second)
+        return;
+    outliersMinheap[0] = pointDistfromCenter;
+    heapify3 (outliersMinheap, 0);
+}
+
+
+
+void findOutliers2 (set <int> &Centers){
+    objective = 0;
+    outliersMinheap.clear();
+    for (int i=0 ; i<input.size() ; i++){
+        set <int>:: iterator it;
+        double Mindist = DBL_MAX;
+        for (it= Centers.begin() ; it!= Centers.end() ; it++){
+            Mindist = min (Mindist , finddist(input[i], points[*it]));
+        }
+        objective+= pow(Mindist,2);
+        addtoOutliers ({i,Mindist});
+    }
+    for (int i=0 ; i<outliersMinheap.size() ; i++)
+        objective-= pow(outliersMinheap[i].second,2);
+    if (objective<MinObj){
+        bestcenters = centers;
+        bestoutliers = outliersMinheap;
+        finalOPT = OPT;
+        MinObj = objective;
+    }
+}
+
+
+void readinput (){
+    input.resize(n);
+    for (int i=0 ; i<n ; i++)
+        input[i].resize(dimension);
+    
+    ifstream file;
+    file.open (inputfilename);
+    
+    for (int i=0 ; i<n; i++)
+        for (int j=0 ; j<dimension ; j++){
+            file >> input[i][j];
+        }
+    
+    file.close();
+}
+
+vector <double> findmean (vector <vector <double>>& v, int curcluster){
+    vector <double> Mean;
+    Mean.resize(dimension);
+    set <int>:: iterator it;
+    double temp = 0;
+    temp = (double)clusters[curcluster].size();
+    
+    for (int i=0 ; i<dimension ; i++){
+        Mean[i] = 0;
+        for (it=clusters[curcluster].begin() ; it!= clusters[curcluster].end() ; it++)
+            Mean[i]+= v[*it][i];
+    }
+    for (int i=0 ; i<dimension ; i++)
+        Mean[i] /= temp;
+    return Mean;
+}
+
+void findnewcenters(vector <vector <double>>& v,  int centersize){
+    for (int i=0 ; i<centersize ; i++){
+        centers[i] = findmean(v , i);
+    }
+}
+
+
+double findcluster (int centersize, vector <vector <double>> & v, int point){
+    double Mindist = DBL_MAX;
+    int bestcenter = -1;
+    
+    for (int i=0 ; i<centersize ; i++){
+        double curdist = finddist (centers[i] , v[point]);
+        if (curdist < Mindist){
+            Mindist = curdist;
+            bestcenter = i;
+        }
+    }
+    
+    curobjective += pow(Mindist,2);
+    clusters[bestcenter].insert(point);
+    return Mindist;
+}
+
+void cluster (vector <vector <double>> & v , int centersize , vector <int>& pointsLabels , int totalpoints){
+    clusters.clear();
+    clusters.resize(centersize);
+    prevobjective = curobjective;
+    curobjective = 0;
+    for (int i=0 ; i<totalpoints ; i++){
+        if (totalpoints == n)
+            findcluster(centersize , v, i);
+        else{
+            findcluster(centersize , v, pointsLabels[i]);
+        }
+        
+    }
+}
+
+void decreaseinheap (){
+    int index = minheap.size()-1;
+    while (index>0 && minheap[index].second < minheap[(index-1)/2].second){
+        swap (minheap[index], minheap[(index-1)/2]);
+        index = (index-1)/2;
+    }
+}
+
+void heapify (int index){
+    int l;
+    int r;
+    int smallest;
+    while (true) {
+        l = index*2+1;
+        r = index*2+2;
+        smallest = index;
+        if (l<minheap.size() && minheap[l].second < minheap[smallest].second){
+            smallest = l;
+        }
+        if (r<minheap.size() && minheap[r].second < minheap[smallest].second){
+            smallest = r;
+        }
+        if (smallest == index)
+            return;
+        swap (minheap[smallest], minheap[index]);
+        index = smallest;
+    }
+}
+
+void addtoheap (pair <int, double> pointdist){
+    if (minheap.size() < outliersize){
+        minheap.push_back(pointdist);
+        decreaseinheap ();
+    }
+    else{
+        if (minheap[0].second < pointdist.second){
+            minheap[0] = pointdist;
+            heapify (0);
+        }
+    }
+}
+
+
+void finalclusters (int centersize , vector <int>& v,  int totalpoints){
+    clusters.clear();
+    clusters.resize(centersize);
+    curobjective = 0;
+    for (int i=0 ; i<totalpoints ; i++){
+        if (totalpoints == n)
+            findcluster(centersize, input, i);
+        else
+            findcluster (centersize , input, v[i]);
+    }
+    weights.clear();
+    weights.resize(centersize);
+    for (int i=0 ; i<centersize ; i++)
+        weights[i] = clusters[i].size();
+}
+
+void uniformsampling(){
+    firstsample.clear();
+    p = ((double)K*(double)log(n))/(double)(outliersize);
+    p*=2.5;
+    for (int i=0 ; i<n; i++){
+        double r = ((double) rand() / (RAND_MAX));
+        if (r<=p)
+            firstsample.push_back(i);
+    }
+}
+
+
+void findMinMaxDists (vector <vector <double>> & v){
+    MinDist = DBL_MAX;
+    MaxDist = DBL_MIN;
+    for (int i=1 ; i<v.size() ; i++){
+        double temp = finddist(v[0], v[i]);
+        MinDist = min (MinDist, temp);
+        MaxDist = max (MaxDist , temp);
+    }
+    if (MinDist == 0){
+        MinDist = 2;
+    }
+}
+
+void Lloyd (vector <vector <double>>& v, int centersize , vector <int> & pointsLabels , int totalpoints){
+    curobjective = DBL_MAX;
+    prevobjective = DBL_MAX;
+    while (true){
+        cluster(v , centersize , pointsLabels , totalpoints);
+        if (prevobjective-curobjective <= minimprovement*prevobjective)
+            break;
+        findnewcenters(v, centersize);
+    }
+}
+
+void kmeansplusplus(vector <vector <double>> & v , int centersize , vector <int>& pointsLabels , int totalpoints){
+    centers.clear();
+    centers.resize(centersize);
+    for (int i=0 ; i<centersize ; i++)
+        centers[i].resize(dimension);
+    
+    map <int , double> distancefromCenter;
+    for (int i=0 ; i<totalpoints ; i++)
+        distancefromCenter[i] = DBL_MAX;
+    
+    firstcenters.clear();
+    
+    int r = rand()%totalpoints;
+    firstcenters.insert(r);
+    int count = 0;
+    for (int i=0 ; i<dimension ; i++){
+        if (totalpoints == n){
+            centers[count][i] = v[r][i];
+        }
+        else
+            centers[count][i] = v[pointsLabels[r]][i];
+    }
+    count++;
+    
+    for (int j=0 ; j<centersize-1 ; j++){
+        double totaldist = 0;
+        for (int i=0 ; i<totalpoints ; i++){
+            double curdist;
+            if (totalpoints == n)
+                curdist = finddist(v[i], v[r]);
+            else{
+                curdist = finddist(v[pointsLabels[i]], v[pointsLabels[r]]);
+            }
+            distancefromCenter[i] = min (distancefromCenter[i],curdist);
+            totaldist+= pow(distancefromCenter[i],2);
+            
+        }
+        double newr = ((double) rand() / (RAND_MAX));
+        double sum = 0;
+        for (int i=0 ; i<totalpoints ; i++){
+            if (firstcenters.find(i) == firstcenters.end()){
+                double temp;
+                temp = pow(distancefromCenter[i],2)/totaldist;
+                sum += temp;
+                if (sum >= newr){
+                    firstcenters.insert(i);
+                    r = i;
+                    i = totalpoints;
+                }
+            }
+        }
+        for (int i=0 ; i<dimension ; i++){
+            if (totalpoints == n){
+                centers[count][i] = v[r][i];
+            }
+            else
+                centers[count][i] = v[pointsLabels[r]][i];
+        }
+        count++;
+    }
+}
+
+void preprocessing(){
+    if ((double)outliersize > 2.5*(double)K*(double)log(n)){
+        uniformsampling();
+        kmeansplusplus(input , K+(int)((double)outliersize*p),firstsample, firstsample.size());
+        Lloyd(input , K+(int)((double)outliersize*p), firstsample,firstsample.size());
+        finalclusters(K+(int)((double)outliersize*p), firstsample, firstsample.size());
+    }
+    else{
+        p = 1.0;
+        firstsample.clear();
+        kmeansplusplus(input , K+(outliersize*p) , firstsample, n);
+        Lloyd(input , K+(outliersize*p) , firstsample , n);
+        finalclusters(K+(outliersize*p) , firstsample, n);
+    }
+}
+
+
+void findmutualOutliers (){
+    ifstream file;
+    file.open (outliersfilename);
+    int temp;
+    unordered_set <int> trueoutliers;
+    for (int i=0 ; i<outliersize; i++){
+        file >> temp;
+        trueoutliers.insert(temp);
+    }
+    file.close();
+    
+    
+    mutual = 0;
+    for (int i=0 ; i<outliersize ; i++){
+        if (trueoutliers.find(bestoutliers[i].first) != trueoutliers.end())
+            mutual++;
+    }
+}
+
+void saveres(){
+    ofstream file1;
+    ofstream file2;
+    file1.open (PDCfilename);
+    file2.open(PDOfilename);
+    for (int i=0 ; i<outliersize ; i++)
+        file2 << bestoutliers[i].first << " ";
+    
+    for (int i=0 ; i<K; i++){
+        for (int j=0 ; j<dimension ; j++)
+            file1 << bestcenters[i][j] << " ";
+        file1 << "\n";
+    }
+    
+    file1.close();
+    file2.close();
+}
+
+void YourInput (){
+    
+    
+    cout << "this code is g++ 4.2 friendly" << endl;
+    cout << "---------------" << endl;
+    
+    cout << "enter #instances (n), dimension (d), #clusters (k) and #noisy-instances aka outliers (z), respectively:" << endl;;
+    
+    cin >> n >> dimension >> K >> outliersize;
+    cout << endl;
+    
+    cout << "enter the directory of your input file." << endl;
+    cout << "example: /home/owner/inputfile.txt" << endl << endl;
+    
+    cout << "your input file should have n rows and d columns. values in a row must be separated by space." << endl;
+    cin >> inputfilename;
+    cout << endl;
+    
+    cout << "enter the directory of your noisy instances file." << endl;
+    cout << "example: /home/owner/outliersfile.txt" << endl << endl;
+    cout << "this file should have z values from 0 to n-1, separated by space, indicating the labels of the outliers." << endl;
+    
+    cin >> outliersfilename;
+    cout << endl;
+    
+    cout << "where do you wish us to write the output centers? enter the directory." << endl;
+    cout << "example: /home/owner/MyCentersfile.txt" << endl << endl;
+    cout << "this file will be filled by k rows and d columns, each row indicating a center outputted by the algorithm. values in the rows are separated by space." << endl;
+    cin >> PDCfilename;
+    cout << endl;
+    
+    cout << "where do you wish us to write the output outliers? enter the directory." << endl;
+    cout << "example: /home/owner/MyOutliersfile.txt" << endl << endl;
+    cout << "this file will be filled by z values from 0 to n-1, separated by space, each indicating the label of an outlier outputted by the algorithm " << endl;
+    cin >> PDOfilename;
+    cout << endl;
+    
+    cout << "thanks! We'll give you the results when they're ready!" << endl;
+    
+
+}
+
+int main(int argc, const char * argv[]) {
+    t1=clock();
+    YourInput ();
+    readinput ();
+    preprocessing();
+    points = centers;
+    
+    findMinMaxDists(points);
+    double lbound = n*pow(2*MinDist,2);
+    double ubound = n*pow(2*MaxDist, 2);
+    setcosts ();
+    
+    for (int i=0 ; i<3 ; i++){
+        for (double l=lbound ; l<=ubound ; l*=2){
+            stopSearch = false;
+            OPT=l;
+            
+            penalty = OPT/(2.0*(double)outliersize);
+            
+            double minfcost = 0;
+            double maxfcost = (20.0*OPT*p)/(double)K;
+            while (minfcost+1<maxfcost){
+                facilitycost = minfcost+(maxfcost-minfcost)/2.0;
+                reset();
+                PDalg();
+                
+                if (paidfor.size() == K){
+                    findOutliers2 (paidfor);
+                    exactlyk = true;
+                    break;
+                }
+                if (paidfor.size() < K)
+                    maxfcost= facilitycost;
+                else
+                    if (paidfor.size() > K)
+                        minfcost=facilitycost+1;
+                
+            }
+            if (exactlyk){
+                continue;
+            }
+            double f1 = maxfcost; //gives less than K centers
+            double f2 = f1-1;
+            set <int> temporaryopen2;
+            map <int, set <int>> Beta2;
+            while (true){
+                if (f2 < 0){
+                   // cout <<"f2 less than 0" << endl;
+                    break;
+                }
+                facilitycost = f2;
+                reset();
+                PDalg();
+                if (paidfor.size() > K){
+                    temporaryopen2 = paidfor;
+                    Beta2 = Beta;
+                    break;
+                }
+                else
+                    f2--;
+            }
+            
+            if (f2>0){
+                facilitycost = f1;
+                reset();
+                PDalg();
+                set <int> temporaryopen1 = paidfor;
+                map <int, set <int>> Beta1 = Beta;
+                if (temporaryopen1.size() >= K){
+                    stopSearch = true;
+                }
+                else{
+                    augment(temporaryopen1 , temporaryopen2, Beta1 , Beta2);
+                    if (!stopSearch)
+                        findOutliers2 (temporaryopen1);
+                }
+            }
+        }
+    }
+    
+    findmutualOutliers();
+    saveres();
+    cout << "mutual outliers "<< mutual << " out of " << outliersize << endl;
+    cout << "precision " << mutual/(double)outliersize << endl;
+    cout << "Primal Dual objective " << MinObj << endl;
+    
+    t2=clock();
+    float diff ((float)t2-(float)t1);
+    float seconds = diff / CLOCKS_PER_SEC;
+    cout <<"running time (seconds): " << seconds<<endl;
+    system ("pause");
+    
+    return 0;
+}
