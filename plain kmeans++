@@ -1,0 +1,340 @@
+#include <iostream>
+#include <vector>
+#include <set>
+#include <cmath>
+#include <map>
+#include <fstream>
+#include <limits>
+#include <float.h>
+#include <ctime>
+#include <stdlib.h>
+#include <unordered_set>
+
+using namespace std;
+
+
+string inputfilename;
+string outliersfilename;
+string VanillaCfilename;
+string VanillaOfilename;
+
+vector <vector <double>> input;
+vector <vector <double>> bestcenters;
+vector <pair <int , double>> bestoutliers;
+int Z;
+int K;
+int d;
+int n;
+int mutual = 0;
+vector <set <int>> clusters;    // keep the points number here
+vector <vector <double>> Kcenters;
+set <int> firstcenters;
+double curobjective;
+double prevobjective;
+vector <pair <int , double>> minheap; //points and distances from cluster
+double outlierscost = 0;
+double minimprovement = 0.00001;
+clock_t t1,t2;
+double MinObj = DBL_MAX;
+
+
+
+
+vector <double> findmean (int curcluster){
+    vector <double> Mean;
+    Mean.resize(d);
+    set <int>:: iterator it;
+    double temp = 0;
+    temp = clusters[curcluster].size();
+    for (int i=0 ; i<d ; i++){
+        Mean[i] = 0;
+        for (it=clusters[curcluster].begin() ; it!= clusters[curcluster].end() ; it++){
+            Mean[i]+= input[*it][i];
+        }
+    }
+    for (int i=0 ; i<d ; i++)
+        Mean[i] /= temp;
+    return Mean;
+}
+
+void findnewcenters(){
+    for (int i=0 ; i<K ; i++){
+        Kcenters[i] = findmean(i);
+    }
+}
+
+double finddist (vector <double>& p1 , vector <double>& p2){
+    double dist = 0;
+    for (int i=0; i<p1.size() ; i++){
+        dist+= pow(p1[i]-p2[i] , 2);
+    }
+    return sqrt(dist);
+}
+
+double findcluster (vector <vector <double>> & v, int p){
+    double Mindist = DBL_MAX;
+    int bestcenter = -1;
+    
+    for (int i=0 ; i<K ; i++){
+        double curdist = finddist (Kcenters[i] , v[p]);
+        if (curdist < Mindist){
+            Mindist = curdist;
+            bestcenter = i;
+        }
+    }
+    curobjective += pow(Mindist,2);
+    clusters[bestcenter].insert(p);
+    return Mindist;
+}
+
+void cluster (){
+    clusters.clear();
+    clusters.resize(K);
+    prevobjective = curobjective;
+    curobjective = 0;
+    for (int i=0 ; i<n ; i++)
+        findcluster(input,i);
+}
+
+void decreaseinheap (){
+    int index = minheap.size()-1;
+    while (index>0 && minheap[index].second < minheap[(index-1)/2].second){
+        swap (minheap[index], minheap[(index-1)/2]);
+        index = (index-1)/2;
+    }
+}
+
+void heapify (int index){
+    int l;
+    int r;
+    int smallest;
+    while (true) {
+        l = index*2+1;
+        r = index*2+2;
+        smallest = index;
+        if (l<minheap.size() && minheap[l].second < minheap[smallest].second){
+            smallest = l;
+        }
+        if (r<minheap.size() && minheap[r].second < minheap[smallest].second){
+            smallest = r;
+        }
+        if (smallest == index)
+            return;
+        swap (minheap[smallest], minheap[index]);
+        index = smallest;
+    }
+}
+
+void addtoheap (pair <int, double> pointdist){
+    if (minheap.size() < Z){
+        minheap.push_back(pointdist);
+        decreaseinheap ();
+    }
+    else{
+        if (minheap[0].second < pointdist.second){
+            minheap[0] = pointdist;
+            heapify (0);
+        }
+    }
+}
+
+void finalclusters (){
+    minheap.clear();
+    for (int i=0 ; i<K ; i++)
+        clusters[i].clear();
+    curobjective = 0;
+    
+    for (int i=0 ; i<n ; i++){
+        addtoheap ({i,findcluster(input, i)});
+    }
+    
+    outlierscost = 0;
+    for (int i=0 ; i<minheap.size() ; i++)
+        outlierscost+= pow(minheap[i].second,2);
+    
+    if (curobjective - outlierscost< MinObj){
+        bestcenters = Kcenters;
+        bestoutliers = minheap;
+        MinObj = curobjective - outlierscost;
+    }
+}
+
+
+void readinput (){
+    input.resize(n);
+    for (int i=0 ; i<n ; i++)
+        input[i].resize(d);
+    
+    ifstream file;
+    file.open (inputfilename);
+    
+    for (int i=0 ; i<n; i++)
+        for (int j=0 ; j<d ; j++){
+            file >> input[i][j];
+        }
+    
+    file.close();
+}
+
+
+
+void kmeansplusplus(){
+    Kcenters.clear();
+    Kcenters.resize(K);
+    for (int i=0 ; i<K ; i++)
+        Kcenters[i].resize(d);
+    
+    
+    map <int , double> distancefromCenter;
+    for (int i=0 ; i<n ; i++)
+        distancefromCenter[i] = DBL_MAX;
+    
+    firstcenters.clear();
+    
+    int r = rand()%n;
+    firstcenters.insert(r);
+    int count = 0;
+    for (int i=0 ; i<d ; i++)
+        Kcenters[count][i] = input[r][i];
+    count++;
+    
+    for (int i=0 ; i<K-1 ; i++){
+        double totaldist = 0;
+        for (int i=0 ; i<n ; i++){
+            double curdist = finddist(input[i], input[r]);
+            distancefromCenter[i] = min (distancefromCenter[i],curdist);
+            totaldist+= pow(distancefromCenter[i],2);
+        }
+        double newr = ((double) rand() / (RAND_MAX));
+        double sum = 0;
+        for (int i=0 ; i<n ; i++){
+            if (firstcenters.find(i) == firstcenters.end()){
+                double temp = pow(distancefromCenter[i],2)/totaldist;
+                sum += temp;
+                if (sum >= newr){
+                    firstcenters.insert(i);
+                    r = i;
+                    i = n;
+                }
+            }
+        }
+        for (int i=0 ; i<d ; i++)
+            Kcenters[count][i] = input[r][i];
+        count++;
+    }
+}
+
+void findmutualOutliers (){
+    ifstream file;
+    file.open (outliersfilename);
+    int temp;
+    unordered_set <int> trueoutliers;
+    for (int i=0 ; i<Z; i++){
+        file >> temp;
+        trueoutliers.insert(temp);
+    }
+    file.close();
+    
+    mutual = 0;
+    for (int i=0 ; i<Z ; i++){
+        if (trueoutliers.find(bestoutliers[i].first) != trueoutliers.end())
+            mutual++;
+    }
+}
+
+void saveres(){
+    ofstream file1;
+    ofstream file2;
+    file1.open (VanillaCfilename);
+    file2.open(VanillaOfilename);
+    for (int i=0 ; i<Z ; i++)
+        file2 << bestoutliers[i].first << " ";
+    
+    for (int i=0 ; i<K; i++){
+        for (int j=0 ; j<d ; j++)
+            file1 << bestcenters[i][j] << " ";
+        file1 << "\n";
+    }
+    
+    file1.close();
+    file2.close();
+}
+
+void initialize() {
+    kmeansplusplus();
+    
+    curobjective = DBL_MAX;
+    prevobjective = DBL_MAX;
+    
+    while (true){
+        cluster();
+        
+        if (prevobjective-curobjective <= minimprovement*prevobjective)
+            break;
+        findnewcenters();
+    }
+    finalclusters();
+}
+
+void YourInput (){
+    
+    cout << "this code is g++ 4.2 friendly" << endl;
+    cout << "---------------" << endl;
+    cout << "enter #instances (n), dimension (d), #clusters (k) and #noisy-instances aka outliers (z), respectively:" << endl;;
+    
+    cin >> n >> d >> K >> Z;
+    cout << endl;
+    
+    cout << "enter the directory of your input file." << endl;
+    cout << "example: /home/owner/inputfile.txt" << endl << endl;
+    
+    cout << "your input file should have n rows and d columns. values in a row must be separated by space." << endl;
+    cin >> inputfilename;
+    cout << endl;
+    
+    cout << "enter the directory of your noisy instances file." << endl;
+    cout << "example: /home/owner/outliersfile.txt" << endl << endl;
+    cout << "this file should have z values from 0 to n-1, separated by space, indicating the labels of the outliers." << endl;
+    
+    cin >> outliersfilename;
+    cout << endl;
+    
+    cout << "where do you wish us to write the output centers? enter the directory." << endl;
+    cout << "example: /home/owner/MyCentersfile.txt" << endl << endl;
+    cout << "this file will be filled by k rows and d columns, each row indicating a center outputted by the algorithm. values in the rows are separated by space." << endl;
+    cin >> VanillaCfilename;
+    cout << endl;
+    
+    cout << "where do you wish us to write the output outliers? enter the directory." << endl;
+    cout << "example: /home/owner/MyOutliersfile.txt" << endl << endl;
+    cout << "this file will be filled by z values from 0 to n-1, separated by space, each indicating the label of an outlier outputted by the algorithm " << endl;
+    cin >> VanillaOfilename;
+    cout << endl;
+    
+    cout << "thanks! We'll give you the results when they're ready!" << endl;
+}
+
+
+int main(int argc, const char * argv[]) {
+    t1=clock();
+    
+    YourInput();
+    readinput ();
+    for (int i=0 ; i<3 ; i++)
+        initialize ();
+    
+    findmutualOutliers();
+    saveres();
+    
+    cout << "mutual outliers "<< mutual << " out of " << Z << endl;
+    cout << "precision " << mutual/(double)Z << endl;
+    cout << "Plain Kmeans++ objective " << MinObj << endl;
+    t2=clock();
+    
+    float diff ((float)t2-(float)t1);
+    float seconds = diff / CLOCKS_PER_SEC;
+    cout <<"running time (seconds): " << seconds<<endl;
+    system ("pause");
+    
+    return 0;
+}
